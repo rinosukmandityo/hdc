@@ -16,16 +16,22 @@ import (
 )
 
 const (
-	BEE_TEMPLATE = "beeline -u jdbc:hive2://%s/%s -n %s -p %s"
+	BEE_TEMPLATE = "%sbeeline -u jdbc:hive2://%s/%s"
+	BEE_USER     = " -n %s"
+	BEE_PASSWORD = " -p %s"
 	BEE_QUERY    = " -e \"%s\""
 	/*SHOW_HEADER  = " --showHeader=true"
 	HIDE_HEADER  = " --showHeader=false"*/
 	CSV_FORMAT = " --outputFormat=csv2"
+	TSV_FORMAT = " --outputFormat=tsv2"
+	/*DSV_FORMAT    = " --outputFormat=dsv --delimiterForDSV=|\t"
+	DSV_DELIMITER = "|\t"*/
 )
 
 // type FnHiveReceive func(string) (interface{}, error)
 
 type Hive struct {
+	BeePath     string
 	Server      string
 	User        string
 	Password    string
@@ -34,8 +40,9 @@ type Hive struct {
 	Header      []string
 }
 
-func HiveConfig(server, dbName, userid, password string) *Hive {
+func HiveConfig(server, dbName, userid, password, path string) *Hive {
 	hv := Hive{}
+	hv.BeePath = path
 	hv.Server = server
 	hv.Password = password
 
@@ -57,12 +64,22 @@ func HiveConfig(server, dbName, userid, password string) *Hive {
 	return &hv
 }
 
-func ParseOut(s string) {
-	fmt.Println(s)
+func SetHeader(header []string) *Hive {
+	hv := Hive{}
+	hv.Header = header
+	return &hv
 }
 
 func (h *Hive) cmdStr(arg ...string) (out string) {
-	out = fmt.Sprintf(BEE_TEMPLATE, h.Server, h.DBName, h.User, h.Password)
+	out = fmt.Sprintf(BEE_TEMPLATE, h.BeePath, h.Server, h.DBName)
+
+	if h.User != "" {
+		out += fmt.Sprintf(BEE_USER, h.User)
+	}
+
+	if h.Password != "" {
+		out += fmt.Sprintf(BEE_PASSWORD, h.Password)
+	}
 
 	for _, value := range arg {
 		out += value
@@ -92,7 +109,6 @@ func (h *Hive) constructHeader(header string) {
 
 func (h *Hive) Exec(query string) (out []string, e error) {
 	h.HiveCommand = query
-	//fmt.Println(h.cmdStr(HIDE_HEADER, CSV_FORMAT))
 	cmd := h.command(h.cmdStr(CSV_FORMAT))
 	outByte, e := cmd.Output()
 	result := strings.Split(string(outByte), "\n")
@@ -101,7 +117,7 @@ func (h *Hive) Exec(query string) (out []string, e error) {
 		h.constructHeader(result[:1][0])
 	}
 
-	fmt.Printf("header: %v\n", h.Header)
+	//fmt.Printf("header: %v\n", h.Header)
 
 	if len(result) > 1 {
 		out = result[1:]
@@ -251,8 +267,11 @@ func (h *Hive) ParseOutput(in string, m interface{}) (e error) {
 				switch v.Field(i).Type.Kind() {
 				case reflect.Int:
 					appendData.Set(v.Field(i).Name, cast.ToInt(appendData[v.Field(i).Name], cast.RoundingAuto))
+				case reflect.Float32:
+					valf, _ := strconv.ParseFloat(appendData[v.Field(i).Name].(string), 32)
+					appendData.Set(v.Field(i).Name, valf)
 				case reflect.Float64:
-					valf, _ := strconv.ParseFloat(appendData[v.Field(i).Name].(string), 64)
+					valf := cast.ToF64(appendData[v.Field(i).Name].(string), 2, cast.RoundingAuto) //strconv.ParseFloat(appendData[v.Field(i).Name].(string), 64)
 					appendData.Set(v.Field(i).Name, valf)
 				}
 			}
