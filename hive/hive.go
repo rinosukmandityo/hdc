@@ -191,15 +191,16 @@ func (h *Hive) Populate(query string, m interface{}) (e error) {
 		h.constructHeader(result[:1][0], delimiter)
 	}
 
-	if len(result) > 1 {
-		rows := result[1:]
+	h.ParseOutput(result[1:], m)
 
+	/*if len(result) > 1 {
+		rows := result[1:]
 		for _, val := range rows {
 			h.ParseOutput(val, m)
-			//out = append(out, obj)
+			out = append(out, obj)
 		}
 
-	}
+	}*/
 
 	return
 }
@@ -364,7 +365,62 @@ func (h *Hive) ImportHDFS(HDFSPath, TableName, Delimiter string, TableModel inte
 	}
 
 	return retVal, err
+}
 
+func (h *Hive) Load(TableName, Delimiter string, TableModel interface{}) (retVal string, err error) {
+	retVal = "process failed"
+	isMatch := false
+	tempVal, err := h.Exec("select '1' from " + TableName + " limit 1")
+
+	if tempVal == nil {
+		tempQuery := ""
+
+		var v reflect.Type
+		v = reflect.TypeOf(TableModel).Elem()
+
+		if v.Kind() == reflect.Struct {
+			tempQuery = "create table " + TableName + " ("
+			for i := 0; i < v.NumField(); i++ {
+				if i == (v.NumField() - 1) {
+					tempQuery += v.Field(i).Name + " " + v.Field(i).Type.String() + ") "
+				} else {
+					tempQuery += v.Field(i).Name + " " + v.Field(i).Type.String() + ", "
+				}
+			}
+			tempVal, err = h.Exec(tempQuery)
+		}
+	} else {
+		isMatch, err = h.CheckDataStructure(TableName, Delimiter, TableModel)
+	}
+
+	if isMatch == false {
+		return retVal, err
+	}
+
+	if err == nil {
+		insertValues := ""
+
+		var v reflect.Type
+		v = reflect.TypeOf(TableModel).Elem()
+
+		if v.Kind() == reflect.Struct {
+			for i := 0; i < v.NumField(); i++ {
+				if i == (v.NumField() - 1) {
+					insertValues += reflect.ValueOf(TableModel).Field(i).String() + ")"
+				} else {
+					insertValues += reflect.ValueOf(TableModel).Field(i).String() + ", "
+				}
+			}
+			retVal := QueryBuilder("insert", TableName, insertValues, TableModel)
+			_, err = h.Exec(retVal)
+		}
+
+		if err == nil {
+			retVal = "success"
+		}
+	}
+
+	return retVal, err
 }
 
 func (h *Hive) LoadFile(HDFSPath, TableName, Delimiter string, TableModel interface{}) (retVal string, err error) {
@@ -382,7 +438,7 @@ func (h *Hive) LoadFile(HDFSPath, TableName, Delimiter string, TableModel interf
 			tempQuery = "create table " + TableName + " ("
 			for i := 0; i < v.NumField(); i++ {
 				if i == (v.NumField() - 1) {
-					tempQuery += v.Field(i).Name + " " + v.Field(i).Type.String() + ") " //row format delimited fields terminated by '" + Delimiter + "'"
+					tempQuery += v.Field(i).Name + " " + v.Field(i).Type.String() + ") "
 				} else {
 					tempQuery += v.Field(i).Name + " " + v.Field(i).Type.String() + ", "
 				}
@@ -390,7 +446,7 @@ func (h *Hive) LoadFile(HDFSPath, TableName, Delimiter string, TableModel interf
 			tempVal, err = h.Exec(tempQuery)
 		}
 	} else {
-		isMatch, err = h.CheckDataStructure(TableName, TableModel)
+		isMatch, err = h.CheckDataStructure(TableName, Delimiter, TableModel)
 	}
 
 	if isMatch == false {
@@ -414,7 +470,7 @@ func (h *Hive) LoadFile(HDFSPath, TableName, Delimiter string, TableModel interf
 			}
 
 			retVal := QueryBuilder("insert", TableName, scanner.Text(), h.ParseOutput(scanner.Text(), TableModel))
-			h.Exec(retVal)
+			_, err = h.Exec(retVal)
 		}
 
 		if err == nil {
@@ -423,10 +479,9 @@ func (h *Hive) LoadFile(HDFSPath, TableName, Delimiter string, TableModel interf
 	}
 
 	return retVal, err
-
 }
 
-func (h *Hive) CheckDataStructure(Tablename string, TableModel interface{}) (isMatch bool, err error) {
+func (h *Hive) CheckDataStructure(Tablename, Delimiter string, TableModel interface{}) (isMatch bool, err error) {
 	isMatch = false
 	res, err := h.Exec("describe " + Tablename + ";")
 
@@ -441,7 +496,7 @@ func (h *Hive) CheckDataStructure(Tablename string, TableModel interface{}) (isM
 		if v.Kind() == reflect.Struct {
 			for i := 0; i < v.NumField(); i++ {
 				if res[i] != "" {
-					lines := strings.Split(res[i], ",")
+					lines := strings.Split(res[i], Delimiter)
 
 					if strings.Replace(strings.TrimSpace(lines[1]), "double", "float", 0) == v.Field(i).Type.String() {
 						isMatch = true
@@ -606,9 +661,30 @@ func (h *Hive) ParseOutput(in interface{}, m interface{}) (e error) {
 	} else if h.OutputType == "json" {
 		var temp interface{}
 		ins = h.InspectJson(ins)
-		inss := fmt.Sprintf("[%s]", strings.Join(ins, ","))
+
+		//for catch multi json in one line
+		if h.JsonPart != "" && slice {
+			for {
+				tempjsonpart := h.JsonPart
+				h.JsonPart = ""
+				tempIn := h.InspectJson([]string{tempjsonpart})
+				if len(tempIn) == 0 {
+					break
+				} else {
+					for _, tin := range tempIn {
+						ins = append(ins, tin)
+					}
+				}
+			}
+		}
+
+		forSerde := strings.Join(ins, ",")
+		if slice {
+			forSerde = fmt.Sprintf("[%s]", strings.Join(ins, ","))
+		}
+
 		if len(ins) > 0 {
-			e := json.Unmarshal([]byte(inss), &temp)
+			e := json.Unmarshal([]byte(forSerde), &temp)
 			if e != nil {
 				return e
 			}
