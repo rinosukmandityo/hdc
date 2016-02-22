@@ -3,76 +3,52 @@ package hive
 import (
 	"bufio"
 	"errors"
-	// "fmt"
+	"github.com/eaciit/errorlib"
 	"io"
-	// "log"
 	"os/exec"
 	"strings"
 )
 
 const (
-	BEE_CLI_STR  = "0: jdbc:hive2:"
+	BEE_CLI_STR  = "jdbc:hive2:"
 	CLOSE_SCRIPT = "!quit"
 )
 
 type DuplexTerm struct {
-	Writer    *bufio.Writer
-	Reader    *bufio.Reader
-	Cmd       *exec.Cmd
-	Stdin     io.WriteCloser
-	Stdout    io.ReadCloser
-	FnReceive FnHiveReceive
+	Writer     *bufio.Writer
+	Reader     *bufio.Reader
+	Cmd        *exec.Cmd
+	CmdStr     string
+	Stdin      io.WriteCloser
+	Stdout     io.ReadCloser
+	FnReceive  FnHiveReceive
+	OutputType string
+	DateFormat string
 }
 
-/*func (d *DuplexTerm) Open() (e error) {
-	if d.Stdin, e = d.Cmd.StdinPipe(); e != nil {
-		return
-	}
-
-	if d.Stdout, e = d.Cmd.StdoutPipe(); e != nil {
-		return
-	}
-
-	d.Writer = bufio.NewWriter(d.Stdin)
-	d.Reader = bufio.NewReader(d.Stdout)
-
-	e = d.Cmd.Start()
-	return
-}*/
+var hr HiveResult
 
 func (d *DuplexTerm) Open() (e error) {
-	if d.Stdin, e = d.Cmd.StdinPipe(); e != nil {
-		return
+	if d.CmdStr != "" {
+		arg := append([]string{"-c"}, d.CmdStr)
+		d.Cmd = exec.Command("sh", arg...)
+
+		if d.Stdin, e = d.Cmd.StdinPipe(); e != nil {
+			return
+		}
+
+		if d.Stdout, e = d.Cmd.StdoutPipe(); e != nil {
+			return
+		}
+
+		d.Writer = bufio.NewWriter(d.Stdin)
+		d.Reader = bufio.NewReader(d.Stdout)
+		d.FnReceive = nil
+		e = d.Cmd.Start()
+	} else {
+		errorlib.Error("", "", "Open", "The Connection Config not Set")
 	}
 
-	if d.Stdout, e = d.Cmd.StdoutPipe(); e != nil {
-		return
-	}
-
-	d.Writer = bufio.NewWriter(d.Stdin)
-	d.Reader = bufio.NewReader(d.Stdout)
-
-	if d.FnReceive != nil {
-		go func() {
-			for {
-				bread, e := d.Reader.ReadString('\n')
-				bread = strings.TrimRight(bread, "\n")
-				peek, _ := d.Reader.Peek(14)
-				peekStr := string(peek)
-
-				if !strings.Contains(bread, BEE_CLI_STR) {
-					//result = append(result, bread)
-					d.FnReceive(bread)
-				}
-
-				if (e != nil && e.Error() == "EOF") || (strings.Contains(peekStr, CLOSE_SCRIPT)) {
-					break
-				}
-
-			}
-		}()
-	}
-	e = d.Cmd.Start()
 	return
 }
 
@@ -82,38 +58,91 @@ func (d *DuplexTerm) Close() {
 	_ = result
 	_ = e
 
+	d.FnReceive = nil
 	d.Cmd.Wait()
 	d.Stdin.Close()
 	d.Stdout.Close()
 }
 
-func (d *DuplexTerm) SendInput(input string) (result []string, e error) {
-	iwrite, e := d.Writer.WriteString(input + "\n")
-	if iwrite == 0 {
-		e = errors.New("Writing only 0 byte")
+func (d *DuplexTerm) SendInput(input string) (res HiveResult, err error) {
+	if d.FnReceive != nil {
+		done := make(chan bool)
+		go func() {
+			res, err = d.process()
+			done <- true
+		}()
+		iwrite, e := d.Writer.WriteString(input + "\n")
+		err = e
+		if iwrite == 0 {
+			err = errors.New("Writing only 0 byte")
+		} else {
+			err = d.Writer.Flush()
+		}
+
+		<-done
+		d.FnReceive = nil
 	} else {
-		e = d.Writer.Flush()
+		iwrite, e := d.Writer.WriteString(input + "\n")
+		err = e
+		if iwrite == 0 {
+			err = errors.New("Writing only 0 byte")
+		} else {
+			err = d.Writer.Flush()
+		}
+		if err == nil && d.FnReceive == nil {
+			done := make(chan bool)
+			go func() {
+				res, err = d.process()
+				done <- true
+			}()
+			<-done
+		}
 	}
+	return
+}
 
-	if e != nil {
-		return
-	}
+func (d *DuplexTerm) process() (result HiveResult, e error) {
+	isHeader := false
+	for {
+		peekBefore, _ := d.Reader.Peek(14)
+		peekBeforeStr := string(peekBefore)
 
-	if d.FnReceive == nil {
-		for {
-			bread, e := d.Reader.ReadString('\n')
-			bread = strings.TrimRight(bread, "\n")
-			peek, _ := d.Reader.Peek(14)
-			peekStr := string(peek)
+		bread, e := d.Reader.ReadString('\n')
+		bread = strings.TrimRight(bread, "\n")
 
-			if !strings.Contains(bread, BEE_CLI_STR) {
-				result = append(result, bread)
-			}
+		peek, _ := d.Reader.Peek(14)
+		peekStr := string(peek)
 
-			if (e != nil && e.Error() == "EOF") || (BEE_CLI_STR == peekStr) {
-				break
+		delimiter := "\t"
+
+		if d.OutputType == CSV {
+			delimiter = ","
+		}
+
+		if isHeader {
+			hr = HiveResult{}
+			hr.constructHeader(bread, delimiter)
+			isHeader = false
+		} else if !strings.Contains(bread, BEE_CLI_STR) {
+			Parse(hr.Header, bread, &hr.ResultObj, d.OutputType, d.DateFormat)
+			if d.FnReceive != nil {
+				hr.Result = []string{bread}
+				d.FnReceive(hr)
+			} else {
+				hr.Result = append(hr.Result, bread)
 			}
 		}
+
+		if strings.Contains(peekBeforeStr, BEE_CLI_STR) {
+			isHeader = true
+		}
+		if (e != nil && e.Error() == "EOF") || strings.Contains(peekStr, BEE_CLI_STR) {
+			if d.FnReceive == nil {
+				result = hr
+			}
+			break
+		}
+
 	}
 
 	return

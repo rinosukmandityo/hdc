@@ -1,12 +1,10 @@
-package hive
+package test
 
 import (
-	//"fmt"
 	"github.com/eaciit/toolkit"
-	. "github.com/frezadev/hdc/hive"
-	//. "github.com/eaciit/hdc/hive"
-	// "reflect"
-	"log"
+	//. "github.com/frezadev/hdc/hive"
+	. "github.com/eaciit/hdc/hive"
+	//. "github.com/RyanCi/hdc/hive"
 	"os"
 	"testing"
 )
@@ -19,6 +17,13 @@ type Sample7 struct {
 	Description string `tag_name:"description"`
 	Total_emp   string `tag_name:"total_emp"`
 	Salary      string `tag_name:"salary"`
+}
+
+type Students struct {
+	Name    string
+	Age     int
+	Phone   string
+	Address string
 }
 
 func killApp(code int) {
@@ -34,32 +39,8 @@ func fatalCheck(t *testing.T, what string, e error) {
 	}
 }
 
-/*func TestHiveConnect(t *testing.T) {
+func TestHiveConnect(t *testing.T) {
 	h = HiveConfig("192.168.0.223:10000", "default", "hdfs", "", "")
-}*/
-
-func TestHiveExec(t *testing.T) {
-	h = HiveConfig("192.168.0.223:10000", "default", "hdfs", "", "")
-	q := "select * from sample_07 limit 5;"
-
-	h.Conn.Open()
-
-	result, e := h.Exec(q)
-
-	if e != nil {
-		log.Printf("error: \n%v\n", e)
-
-	} else {
-		log.Printf("result: \n%v\n", result)
-
-		for _, res := range result {
-			var tmp toolkit.M
-			h.ParseOutput(res, &tmp)
-			log.Println(tmp)
-		}
-	}
-
-	h.Conn.Close()
 }
 
 /* Populate will exec query and immidiately return the value into object
@@ -69,7 +50,6 @@ Exec is suitable for long type query that return massive amount of data and requ
 Ideally Populate should call Exec as well but already have predefined function on it receiving process
 */
 func TestHivePopulate(t *testing.T) {
-	h = HiveConfig("192.168.0.223:10000", "default", "hdfs", "", "")
 	q := "select * from sample_07 limit 5;"
 
 	var result []toolkit.M
@@ -80,82 +60,87 @@ func TestHivePopulate(t *testing.T) {
 	fatalCheck(t, "Populate", e)
 
 	if len(result) != 5 {
-		log.Printf("Error want %d got %d", 5, len(result))
+		t.Logf("Error want %d got %d", 5, len(result))
 	}
 
-	log.Printf("Result: \n%s", toolkit.JsonString(result))
+	t.Logf("Result: \n%s", toolkit.JsonString(result))
 
 	h.Conn.Close()
 }
 
-func TestExecLine(t *testing.T) {
-	h = HiveConfig("192.168.0.223:10000", "default", "hdfs", "", "")
+func TestHiveExec(t *testing.T) {
+	i := 0
 	q := "select * from sample_07 limit 5;"
-	x := "select * from sample_07 limit 10;"
-	var DoSomething = func(res string) (interface{}, error) {
-		tmp := Sample7{}
-		//h.ParseOutput(res, &tmp)
-		log.Println(res)
-		return tmp, nil
-	}
 
-	/*var DoElse = func(res string) (interface{}, error) {
-		tmp := Sample7{}
-		h.Header = []string{}
-		h.ParseOutput(res, &tmp)
-		log.Printf("Else: %v\n", res)
-		return tmp, nil
-	}*/
-
-	h.Conn.FnReceive = DoSomething
 	h.Conn.Open()
 
-	h.ExecLineX(q)
-	h.ExecLineX(x)
-	// log.Printf("error: \n%v\n", e)
+	e := h.Exec(q, func(x HiveResult) error {
+		i++
+		t.Logf("Receiving data: %s", toolkit.JsonString(x))
+		return nil
+	})
+
+	if e != nil {
+		t.Fatalf("Error exec query: %s", e.Error())
+	}
+
+	if i < 5 {
+		t.Fatalf("Error receive result. Expect %d got %d", 5, i)
+	}
 
 	h.Conn.Close()
 }
 
-//func main() {
+func TestHiveExecMulti(t *testing.T) {
+	h.Conn.Open()
 
-/*fmt.Println("---------------------- EXEC LINE ----------------")
+	var ms1, ms2 []HiveResult
+	q := "select * from sample_07 limit 5"
 
-//to execute query and read the result per line and then process its result
+	e := h.Exec(q, func(x HiveResult) error {
+		ms1 = append(ms1, x)
+		return nil
+	})
 
-var DoSomething = func(res string) {
-	tmp := Sample7{}
-	h.ParseOutput(res, &tmp)
-	fmt.Println(tmp)
+	fatalCheck(t, "HS1 exec", e)
+
+	e = h.Exec(q, func(x HiveResult) error {
+		ms2 = append(ms2, x)
+		return nil
+	})
+
+	fatalCheck(t, "HS2 Exec", e)
+
+	t.Logf("Value of HS1\n%s\n\nValue of HS2\n%s", toolkit.JsonString(ms1), toolkit.JsonString(ms2))
+
+	h.Conn.Close()
 }
 
-e = h.ExecLine(q, DoSomething)
-fmt.Printf("error: \n%v\n", e)*/
+func TestLoad(t *testing.T) {
+	h.Conn.Open()
 
-/*h = HiveConfig("192.168.0.223:10000", "default", "developer", "b1gD@T@", nil)
-h.Header = []string{"code", "description", "total_emp", "salary"}
-// qTest := "00-0000	All Occupations, asdfa,a dadsfasd	134354250	40690"
-//qTest := "00-0000 All Occupations 134354250       40690"
-qTest := "00-0000,All Occupations asdfa a dadsfasd,134354250,40690"
-var result = Sample7{}
-h.ParseOutput(qTest, &result)
-fmt.Printf("result: %s\n", result.Code)
-fmt.Printf("result: %s\n", result.Description)
-fmt.Printf("result: %s\n", result.Total_emp)
-fmt.Printf("result: %s\n", result.Salary)*/
-//}
+	var Student Students
 
-// test := "00-0000,All Occupations,134354250,40690"
+	retVal, err := h.Load("students", "|", &Student)
 
-/*var x = Sample7{}
-var z interface{}
-z = x
-s := reflect.ValueOf(&z).Elem()
-typeOfT := s.Type()
-fmt.Println(reflect.ValueOf(&z).Interface())
-for i := 0; i < s.NumField(); i++ {
-	f := s.Field(i)
-	tag := s.Type().Field(i).Tag
-	fmt.Printf("%d: %s %s = %v | tag %s \n", i, typeOfT.Field(i).Name, f.Type(), f.Interface(), tag.Get("tag_name"))
+	if err != nil {
+		t.Log(err)
+	}
+	h.Conn.Close()
+	t.Log(retVal)
+}
 
-}*/
+//for now, this function works on simple csv file
+func TestLoadFile(t *testing.T) {
+	h.Conn.Open()
+
+	var Student Students
+
+	retVal, err := h.LoadFile("/home/developer/contoh.txt", "students", "txt", &Student)
+
+	if err != nil {
+		t.Log(err)
+	}
+	h.Conn.Close()
+	t.Log(retVal)
+}
