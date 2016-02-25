@@ -1,10 +1,11 @@
 package test
 
 import (
-	"github.com/eaciit/toolkit"
-	//. "github.com/frezadev/hdc/hive"
 	. "github.com/eaciit/hdc/hive"
+	"github.com/eaciit/toolkit"
+	// . "github.com/frezadev/hdc/hive"
 	//. "github.com/RyanCi/hdc/hive"
+	// "log"
 	"os"
 	"testing"
 )
@@ -41,12 +42,15 @@ func fatalCheck(t *testing.T, what string, e error) {
 
 func TestHiveConnect(t *testing.T) {
 	h = HiveConfig("192.168.0.223:10000", "default", "hdfs", "", "")
+	e := h.Conn.Open()
+	e = h.Conn.TestConnection()
+	h.Conn.Close()
+	fatalCheck(t, "Populate", e)
 }
 
 /* Populate will exec query and immidiately return the value into object
 Populate is suitable for short type query that return limited data,
 Exec is suitable for long type query that return massive amount of data and require time to produce it
-
 Ideally Populate should call Exec as well but already have predefined function on it receiving process
 */
 func TestHivePopulate(t *testing.T) {
@@ -54,9 +58,10 @@ func TestHivePopulate(t *testing.T) {
 
 	var result []toolkit.M
 
-	h.Conn.Open()
+	e := h.Conn.Open()
+	fatalCheck(t, "Populate", e)
 
-	e := h.Populate(q, &result)
+	e = h.Populate(q, &result)
 	fatalCheck(t, "Populate", e)
 
 	if len(result) != 5 {
@@ -72,9 +77,10 @@ func TestHiveExec(t *testing.T) {
 	i := 0
 	q := "select * from sample_07 limit 5;"
 
-	h.Conn.Open()
+	e := h.Conn.Open()
+	fatalCheck(t, "Populate", e)
 
-	e := h.Exec(q, func(x HiveResult) error {
+	e = h.Exec(q, func(x HiveResult) error {
 		i++
 		t.Logf("Receiving data: %s", toolkit.JsonString(x))
 		return nil
@@ -92,12 +98,13 @@ func TestHiveExec(t *testing.T) {
 }
 
 func TestHiveExecMulti(t *testing.T) {
-	h.Conn.Open()
+	e := h.Conn.Open()
+	fatalCheck(t, "Populate", e)
 
 	var ms1, ms2 []HiveResult
 	q := "select * from sample_07 limit 5"
 
-	e := h.Exec(q, func(x HiveResult) error {
+	e = h.Exec(q, func(x HiveResult) error {
 		ms1 = append(ms1, x)
 		return nil
 	})
@@ -117,7 +124,8 @@ func TestHiveExecMulti(t *testing.T) {
 }
 
 func TestLoad(t *testing.T) {
-	h.Conn.Open()
+	err := h.Conn.Open()
+	fatalCheck(t, "Populate", e)
 
 	var Student Students
 
@@ -132,7 +140,8 @@ func TestLoad(t *testing.T) {
 
 //for now, this function works on simple csv file
 func TestLoadFile(t *testing.T) {
-	h.Conn.Open()
+	err := h.Conn.Open()
+	fatalCheck(t, "Populate", e)
 
 	var Student Students
 
@@ -141,6 +150,23 @@ func TestLoadFile(t *testing.T) {
 	if err != nil {
 		t.Log(err)
 	}
+	h.Conn.Close()
+	t.Log(retVal)
+}
+
+func TestLoadFileWithWorker(t *testing.T) {
+	err := h.Conn.Open()
+	fatalCheck(t, "Populate", e)
+
+	var student Students
+
+	totalWorker := 10
+	retVal, err := h.LoadFileWithWorker("/home/developer/contoh.txt", "students", "txt", &student, totalWorker)
+
+	if err != nil {
+		t.Log(err)
+	}
+
 	h.Conn.Close()
 	t.Log(retVal)
 }

@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"fmt"
 	"github.com/eaciit/errorlib"
+	wk "github.com/eaciit/hdc/worker"
 	"github.com/eaciit/toolkit"
 	"log"
 	"os"
@@ -113,7 +114,7 @@ func (h *Hive) Populate(query string, m interface{}) (e error) {
 }
 
 func (h *Hive) fetch(query string) (hr HiveResult, e error) {
-	if !strings.HasPrefix(query, ";") {
+	if strings.LastIndex(query, ";") == -1 {
 		query += ";"
 	}
 
@@ -202,9 +203,9 @@ func (h *Hive) Load(TableName, Delimiter string, TableModel interface{}) (retVal
 			_, err = h.fetch(tempQuery)
 
 		}
-	} else {
-		isMatch, err = h.CheckDataStructure(TableName, TableModel)
 	}
+
+	isMatch, err = h.CheckDataStructure(TableName, TableModel)
 
 	if isMatch == false {
 		return retVal, err
@@ -274,9 +275,9 @@ func (h *Hive) LoadFile(FilePath, TableName, fileType string, TableModel interfa
 			}
 			_, err = h.fetch(tempQuery)
 		}
-	} else {
-		isMatch, err = h.CheckDataStructure(TableName, TableModel)
 	}
+
+	isMatch, err = h.CheckDataStructure(TableName, TableModel)
 
 	if isMatch == false {
 		return retVal, err
@@ -298,7 +299,6 @@ func (h *Hive) LoadFile(FilePath, TableName, fileType string, TableModel interfa
 		//put depatcher here
 
 		for scanner.Scan() {
-
 			//put worker here
 
 			err = Parse([]string{}, scanner.Text(), TableModel, "csv", "")
@@ -337,6 +337,115 @@ func (h *Hive) LoadFile(FilePath, TableName, fileType string, TableModel interfa
 			}
 
 		}
+
+		if err == nil {
+			retVal = "success"
+		}
+	}
+
+	return retVal, err
+}
+
+// loading file with worker
+func (h *Hive) LoadFileWithWorker(FilePath, TableName, fileType string, TableModel interface{}, TotalWorker int) (retVal string, err error) {
+	retVal = "process failed"
+	isMatch := false
+	hr, err := h.fetch("select '1' from " + TableName + " limit 1;")
+
+	if err != nil {
+		return retVal, err
+	}
+
+	if hr.Result == nil {
+		tempQuery := ""
+
+		var v reflect.Type
+		v = reflect.TypeOf(TableModel).Elem()
+
+		if v.Kind() == reflect.Struct {
+			tempQuery = "create table " + TableName + " ("
+			for i := 0; i < v.NumField(); i++ {
+				if i == (v.NumField() - 1) {
+					tempQuery += v.Field(i).Name + " " + v.Field(i).Type.String() + ");"
+				} else {
+					tempQuery += v.Field(i).Name + " " + v.Field(i).Type.String() + ", "
+				}
+			}
+			_, err = h.fetch(tempQuery)
+		}
+	}
+
+	isMatch, err = h.CheckDataStructure(TableName, TableModel)
+
+	if isMatch == false {
+		return retVal, err
+	}
+
+	if err == nil {
+		file, err := os.Open(FilePath)
+		if err != nil {
+			fmt.Println(err)
+		}
+		defer file.Close()
+
+		if err != nil {
+			log.Println(err)
+		}
+
+		scanner := bufio.NewScanner(file)
+
+		// initiate dispatcher
+		manager := wk.NewManager(TotalWorker)
+
+		// initiate workers
+		for x := 0; x < TotalWorker; x++ {
+			manager.FreeWorkers <- &wk.Worker{x, manager.TimeProcess, manager.FreeWorkers}
+		}
+
+		// monitoring worker whos free
+		go manager.DoMonitor()
+
+		for scanner.Scan() {
+			err = Parse([]string{}, scanner.Text(), TableModel, "csv", "")
+
+			if err != nil {
+				log.Println(err)
+			}
+			insertValues := ""
+
+			var v reflect.Type
+			v = reflect.TypeOf(TableModel).Elem()
+
+			if v.Kind() == reflect.Struct {
+				for i := 0; i < v.NumField(); i++ {
+					if v.Field(i).Type.String() == "string" {
+						insertValues += "\"" + reflect.ValueOf(TableModel).Elem().Field(i).String() + "\""
+					} else if v.Field(i).Type.String() == "int" {
+						temp, _ := strconv.ParseInt(reflect.ValueOf(TableModel).Elem().Field(i).String(), 32, 32)
+						insertValues += strconv.FormatInt(temp, 10)
+					} else if v.Field(i).Type.String() == "float" {
+						insertValues += strconv.FormatFloat(reflect.ValueOf(TableModel).Elem().Field(i).Float(), 'f', 6, 64)
+					} else {
+						insertValues += "\"" + reflect.ValueOf(TableModel).Elem().Field(i).Interface().(string) + "\""
+					}
+
+					if i < v.NumField()-1 {
+						insertValues += ", "
+					}
+				}
+			}
+
+			manager.Tasks <- func() {
+				if insertValues != "" {
+					retQuery := QueryBuilder("insert", TableName, insertValues, TableModel)
+					_, err = h.fetch(retQuery)
+				}
+			}
+		}
+
+		// waiting for tasks has been done
+		go manager.Timeout(3)
+		<-manager.Done
 
 		if err == nil {
 			retVal = "success"
