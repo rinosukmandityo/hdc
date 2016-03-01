@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"github.com/eaciit/cast"
 	"github.com/eaciit/errorlib"
-	wk "github.com/eaciit/hdc/worker"
 	"github.com/eaciit/toolkit"
 	"log"
 	"os"
@@ -13,6 +12,7 @@ import (
 	"reflect"
 	"strconv"
 	"strings"
+	"sync"
 )
 
 const (
@@ -142,41 +142,41 @@ func (h *Hive) Exec(query string, fn FnHiveReceive) (e error) {
 	return
 }
 
-func (h *Hive) ImportHDFS(HDFSPath, TableName, Delimiter string, TableModel interface{}) (retVal string, err error) {
-	retVal = "process failed"
-	hr, err := h.fetch("select '1' from " + TableName + " limit 1;")
+// func (h *Hive) ImportHDFS(HDFSPath, TableName, Delimiter string, TableModel interface{}) (retVal string, err error) {
+// 	retVal = "process failed"
+// 	hr, err := h.fetch("select '1' from " + TableName + " limit 1;")
 
-	if hr.Result == nil {
-		tempQuery := ""
+// 	if hr.Result == nil {
+// 		tempQuery := ""
 
-		var v reflect.Type
-		v = reflect.TypeOf(TableModel).Elem()
+// 		var v reflect.Type
+// 		v = reflect.TypeOf(TableModel).Elem()
 
-		if v.Kind() == reflect.Struct {
-			tempQuery = "create table " + TableName + " ("
-			for i := 0; i < v.NumField(); i++ {
-				if i == (v.NumField() - 1) {
-					tempQuery += v.Field(i).Name + " " + v.Field(i).Type.String() + ") row format delimited fields terminated by '" + Delimiter + "'"
-				} else {
-					tempQuery += v.Field(i).Name + " " + v.Field(i).Type.String() + ", "
-				}
-			}
-			hr, err = h.fetch(tempQuery)
-		}
-	}
+// 		if v.Kind() == reflect.Struct {
+// 			tempQuery = "create table " + TableName + " ("
+// 			for i := 0; i < v.NumField(); i++ {
+// 				if i == (v.NumField() - 1) {
+// 					tempQuery += v.Field(i).Name + " " + v.Field(i).Type.String() + ") row format delimited fields terminated by '" + Delimiter + "'"
+// 				} else {
+// 					tempQuery += v.Field(i).Name + " " + v.Field(i).Type.String() + ", "
+// 				}
+// 			}
+// 			hr, err = h.fetch(tempQuery)
+// 		}
+// 	}
 
-	if err != nil {
-		hr, err = h.fetch("load data local inpath '" + HDFSPath + "' overwrite into table " + TableName + ";")
+// 	if err != nil {
+// 		hr, err = h.fetch("load data local inpath '" + HDFSPath + "' overwrite into table " + TableName + ";")
 
-		if err != nil {
-			retVal = "success"
-		}
-	}
+// 		if err != nil {
+// 			retVal = "success"
+// 		}
+// 	}
 
-	return retVal, err
-}
+// 	return retVal, err
+// }
 
-func (h *Hive) Load(TableName, Delimiter, dateFormat string, TableModel interface{}) (retVal string, err error) {
+func (h *Hive) Load(TableName, dateFormat string, TableModel interface{}) (retVal string, err error) {
 	retVal = "process failed"
 	isMatch := false
 	hr, err := h.fetch("select '1' from " + TableName + " limit 1;")
@@ -220,7 +220,7 @@ func (h *Hive) Load(TableName, Delimiter, dateFormat string, TableModel interfac
 
 		if v.Kind() == reflect.Struct {
 			for i := 0; i < v.NumField(); i++ {
-				insertValues += CheckDataType(v.Field(i), reflect.ValueOf(TableModel).Elem().Field(i).String(), dateFormat)
+				insertValues += CheckDataType(v.Field(i), reflect.ValueOf(TableModel).Elem().Field(i).Interface(), dateFormat)
 
 				if i < v.NumField()-1 {
 					insertValues += ", "
@@ -300,7 +300,7 @@ func (h *Hive) LoadFile(FilePath, TableName, fileType, dateFormat string, TableM
 
 				if v.Kind() == reflect.Struct {
 					for i := 0; i < v.NumField(); i++ {
-						insertValues += CheckDataType(v.Field(i), reflect.ValueOf(TableModel).Elem().Field(i).String(), dateFormat)
+						insertValues += CheckDataType(v.Field(i), reflect.ValueOf(TableModel).Elem().Field(i).Interface(), dateFormat)
 
 						if i < v.NumField()-1 {
 							insertValues += ", "
@@ -329,7 +329,7 @@ func (h *Hive) LoadFile(FilePath, TableName, fileType, dateFormat string, TableM
 
 					if v.Kind() == reflect.Struct {
 						for i := 0; i < v.NumField(); i++ {
-							insertValues += CheckDataType(v.Field(i), reflect.ValueOf(TableModel).Elem().Field(i).String(), dateFormat)
+							insertValues += CheckDataType(v.Field(i), reflect.ValueOf(TableModel).Elem().Field(i).Interface(), dateFormat)
 
 							if i < v.NumField()-1 {
 								insertValues += ", "
@@ -354,7 +354,10 @@ func (h *Hive) LoadFile(FilePath, TableName, fileType, dateFormat string, TableM
 }
 
 // loading file with worker
-func (h *Hive) LoadFileWithWorker(FilePath, TableName, fileType, dateFormat string, TableModel interface{}, TotalWorker int) (retVal string, err error) {
+func (h *Hive) LoadFileWithWorker(FilePath, TableName, fileType string, dateFormat string, TableModel interface{}, TotalWorker int) (retVal string, err error) {
+	var wg sync.WaitGroup
+	var mutex = &sync.Mutex{}
+
 	retVal = "process failed"
 	isMatch := false
 	hr, err := h.fetch("select '1' from " + TableName + " limit 1;")
@@ -400,55 +403,96 @@ func (h *Hive) LoadFileWithWorker(FilePath, TableName, fileType, dateFormat stri
 		}
 
 		scanner := bufio.NewScanner(file)
+		var tempString []string
 
 		// initiate dispatcher
-		manager := wk.NewManager(TotalWorker)
+		manager := NewHiveManager(TotalWorker)
 
 		// initiate workers
 		for x := 0; x < TotalWorker; x++ {
-			manager.FreeWorkers <- &wk.Worker{x, manager.TimeProcess, manager.FreeWorkers}
+			wh := HiveConfig(h.Server, h.DBName, h.User, h.Password, "")
+			manager.FreeWorkers <- &HiveWorker{x, manager.TimeProcess, manager.FreeWorkers, wh, false}
 		}
 
 		// monitoring worker whos free
-		go manager.DoMonitor()
+		wg.Add(1)
+		go manager.DoMonitor(&wg)
 
 		for scanner.Scan() {
-			err = Parse([]string{}, scanner.Text(), TableModel, fileType, dateFormat)
+			mutex.Lock()
+			textLine := scanner.Text()
+			mutex.Unlock()
+			retQuery := ""
+			if strings.ToLower(fileType) != "json" {
+				insertValues := ""
+				err = Parse([]string{}, textLine, TableModel, fileType, dateFormat)
 
-			if err != nil {
-				log.Println(err)
-			}
-			insertValues := ""
+				if err != nil {
+					log.Println(err)
+				}
 
-			var v reflect.Type
-			v = reflect.TypeOf(TableModel).Elem()
+				var v reflect.Type
+				v = reflect.TypeOf(TableModel).Elem()
 
-			if v.Kind() == reflect.Struct {
-				for i := 0; i < v.NumField(); i++ {
-					insertValues += CheckDataType(v.Field(i), reflect.ValueOf(TableModel).Elem().Field(i).String(), dateFormat)
+				if v.Kind() == reflect.Struct {
+					for i := 0; i < v.NumField(); i++ {
+						insertValues += CheckDataType(v.Field(i), reflect.ValueOf(TableModel).Elem().Field(i).Interface(), dateFormat)
 
-					if i < v.NumField()-1 {
-						insertValues += ", "
+						if i < v.NumField()-1 {
+							insertValues += ", "
+						}
+					}
+				}
+
+				if insertValues != "" {
+					retQuery = QueryBuilder("insert", TableName, insertValues, TableModel)
+				}
+
+			} else {
+				tempString = InspectJson([]string{textLine})
+
+				if len(tempString) > 0 {
+					insertValues := ""
+					err = Parse([]string{}, strings.Join(tempString, ","), TableModel, fileType, dateFormat)
+
+					if err != nil {
+						log.Println(err)
+					}
+
+					var v reflect.Type
+					v = reflect.TypeOf(TableModel).Elem()
+
+					if v.Kind() == reflect.Struct {
+						for i := 0; i < v.NumField(); i++ {
+							insertValues += CheckDataType(v.Field(i), reflect.ValueOf(TableModel).Elem().Field(i).Interface(), dateFormat)
+
+							if i < v.NumField()-1 {
+								insertValues += ", "
+							}
+						}
+					}
+
+					if insertValues != "" && strings.Contains(insertValues, ",") {
+						retQuery = QueryBuilder("insert", TableName, insertValues, TableModel)
 					}
 				}
 			}
-
-			manager.Tasks <- func() {
-				if insertValues != "" {
-					retQuery := QueryBuilder("insert", TableName, insertValues, TableModel)
-					_, err = h.fetch(retQuery)
-				}
-			}
+			manager.Tasks <- retQuery
 		}
 
 		// waiting for tasks has been done
-		go manager.Timeout(3)
+		wg.Add(1)
+		go manager.Timeout(3, &wg)
 		<-manager.Done
 
 		if err == nil {
 			retVal = "success"
 		}
+
+		manager.EndWorker()
 	}
+
+	wg.Wait()
 
 	return retVal, err
 }
@@ -469,22 +513,37 @@ func (h *Hive) CheckDataStructure(Tablename string, TableModel interface{}) (isM
 
 			for i := 0; i < v.NumField(); i++ {
 				if hr.Result != nil {
+					log.Printf("------- %d    %d\n", len(hr.Result), i)
 					line := strings.Split(strings.Replace(hr.Result[i], "'", "", -1), "\t")
-					var tempDataType = ""
 
-					if strings.TrimSpace(line[1]) == "double" {
-						tempDataType = "float"
-					} else if strings.TrimSpace(line[1]) == "varchar(64)" {
-						tempDataType = "string"
+					if strings.ToLower(strings.TrimSpace(line[0])) == strings.ToLower(strings.TrimSpace(v.Field(i).Name)) {
+						var tempDataType = ""
+
+						if strings.ToLower(strings.TrimSpace(line[1])) == "double" {
+							tempDataType = "float"
+						} else if strings.ToLower(strings.TrimSpace(line[1])) == "varchar(64)" {
+							tempDataType = "string"
+						} else if strings.ToLower(strings.TrimSpace(line[1])) == "date" {
+							tempDataType = "time"
+						} else {
+							tempDataType = strings.ToLower(strings.TrimSpace(line[1]))
+						}
+
+						if strings.Contains(v.Field(i).Type.String(), tempDataType) {
+							isMatch = true
+						} else {
+							isMatch = false
+							break
+						}
 					} else {
-						tempDataType = strings.TrimSpace(line[1])
-					}
+						// handle new column
+						_, err := h.fetch(QueryBuilder("add column", Tablename, "", TableModel))
 
-					if tempDataType == v.Field(i).Type.String() {
+						if err != nil {
+							break
+						}
+
 						isMatch = true
-					} else {
-						isMatch = false
-						break
 					}
 				} else {
 					// handle new column
@@ -536,7 +595,7 @@ func QueryBuilder(clause, tablename, input string, TableModel interface{}) (retV
 	return retVal
 }
 
-func CheckDataType(inputModel reflect.StructField, inputVal, dateFormat string) (output string) {
+func CheckDataType(inputModel reflect.StructField, inputVal interface{}, dateFormat string) (output string) {
 	if dateFormat == "" {
 		dateFormat = "dd/MM/yyyy"
 	}
@@ -545,33 +604,34 @@ func CheckDataType(inputModel reflect.StructField, inputVal, dateFormat string) 
 
 	switch inputModel.Type.Kind() {
 	case reflect.Int:
-		temp, _ := strconv.ParseInt(inputVal, 32, 32)
+		temp, _ := strconv.ParseInt(strconv.Itoa(inputVal.(int)), 10, 32)
 		output = strconv.FormatInt(temp, 10)
 	case reflect.Int16:
-		temp, _ := strconv.ParseInt(inputVal, 32, 32)
+		temp, _ := strconv.ParseInt(strconv.Itoa(inputVal.(int)), 10, 32)
 		output = strconv.FormatInt(temp, 10)
 	case reflect.Int32:
-		temp, _ := strconv.ParseInt(inputVal, 32, 32)
+		temp, _ := strconv.ParseInt(strconv.Itoa(inputVal.(int)), 10, 32)
 		output = strconv.FormatInt(temp, 10)
 	case reflect.Int64:
-		temp, _ := strconv.ParseInt(inputVal, 32, 32)
+		temp, _ := strconv.ParseInt(strconv.Itoa(inputVal.(int)), 10, 32)
 		output = strconv.FormatInt(temp, 10)
 	case reflect.Float32:
-		temp, _ := strconv.ParseFloat(inputVal, 32)
-		output = strconv.FormatFloat(temp, 'f', 6, 64)
+		temp, _ := strconv.ParseFloat(strconv.FormatFloat(inputVal.(float64), 'f', 3, 32), 32)
+		output = strconv.FormatFloat(temp, 'f', 3, 32)
 	case reflect.Float64:
-		temp, _ := strconv.ParseFloat(inputVal, 32)
-		output = strconv.FormatFloat(temp, 'f', 6, 64)
+		temp, _ := strconv.ParseFloat(strconv.FormatFloat(inputVal.(float64), 'f', 3, 64), 64)
+		output = strconv.FormatFloat(temp, 'f', 3, 64)
 	case reflect.Bool:
-		temp, _ := strconv.ParseBool(inputVal)
+		temp, _ := strconv.ParseBool(strconv.FormatBool(inputVal.(bool)))
 		output = strconv.FormatBool(temp)
 	case reflect.String:
-		output += "\"" + inputVal + "\""
+		output += "\"" + inputVal.(string) + "\""
 	default:
-		dtype := DetectDataType(inputVal, dateFormat)
+		dtype := DetectDataType(inputVal.(string), dateFormat)
 		if dtype == "date" {
-			output = "\"" + cast.Date2String(cast.String2Date(inputVal, dateFormat), dateFormat) + "\""
+			output = "\"" + cast.Date2String(cast.String2Date(inputVal.(string), dateFormat), dateFormat) + "\""
 		}
 	}
+
 	return output
 }
